@@ -1,0 +1,14 @@
+
+{
+	"name": "notification_app_be",
+	"version": "1.0.0",
+	"description": "Backend for notification app",
+	"main": "priority_inbox.js",
+	"scripts": {
+		"start": "node priority_inbox.js"
+	},
+	"author": "",
+	"license": "ISC",
+	"dependencies": {}
+}
+
