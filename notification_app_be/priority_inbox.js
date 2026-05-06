@@ -1,22 +1,32 @@
+// notification_app_be/priority_inbox.js
 const { Log } = require("../logging_middleware");
-require("dotenv").config();
+require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 
-const TOKEN = process.env.ACCESS_TOKEN;
 const NOTIF_URL = "http://20.207.122.201/evaluation-service/notifications";
 
+// Priority weights: Placement > Result > Event
 const WEIGHT = { Placement: 3, Result: 2, Event: 1 };
 
-// Min-heap by priority score
+/**
+ * Min-Heap storing the top-N highest priority notifications.
+ * Score = weight * 1e12 + unix_ms  →  type wins first, then recency.
+ */
 class MinHeap {
   constructor() { this.heap = []; }
-  
+
+  _score(item) {
+    const ts = new Date(item.Timestamp).getTime();
+    return (WEIGHT[item.Type] || 0) * 1e12 + ts;
+  }
+
   push(item) {
     this.heap.push(item);
     this._bubbleUp(this.heap.length - 1);
   }
 
   pop() {
-    const top = this.heap[0];
+    if (this.heap.length === 0) return null;
+    const top  = this.heap[0];
     const last = this.heap.pop();
     if (this.heap.length > 0) {
       this.heap[0] = last;
@@ -27,11 +37,6 @@ class MinHeap {
 
   peek() { return this.heap[0]; }
   size() { return this.heap.length; }
-
-  _score(item) {
-    const ts = new Date(item.Timestamp).getTime();
-    return (WEIGHT[item.Type] || 0) * 1e12 + ts;
-  }
 
   _bubbleUp(i) {
     while (i > 0) {
@@ -58,52 +63,72 @@ class MinHeap {
   }
 }
 
+/**
+ * Returns top N notifications sorted highest-priority first.
+ * O(m log N) where m = total notifications.
+ */
 function getTopN(notifications, n) {
   const heap = new MinHeap();
   for (const notif of notifications) {
     if (heap.size() < n) {
       heap.push(notif);
-    } else {
-      const minScore = heap._score(heap.peek());
-      const curScore = heap._score(notif);
-      if (curScore > minScore) {
-        heap.pop();
-        heap.push(notif);
-      }
+    } else if (heap._score(notif) > heap._score(heap.peek())) {
+      heap.pop();
+      heap.push(notif);
     }
   }
-  // Extract and sort descending (highest priority first)
+  // Drain heap in ascending order then reverse → descending (best first)
   const result = [];
   while (heap.size() > 0) result.unshift(heap.pop());
   return result;
 }
 
 async function main() {
-  await Log("backend", "info", "service", "Starting priority inbox fetch");
+  const token = process.env.ACCESS_TOKEN;
+  if (!token) {
+    console.error("❌ ACCESS_TOKEN not set in .env");
+    process.exit(1);
+  }
+
+  await Log("backend", "info", "service", "Starting priority inbox computation");
 
   const res = await fetch(NOTIF_URL, {
-    headers: { "Authorization": `Bearer ${TOKEN}` }
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json"
+    }
   });
-  const data = await res.json();
+
+  if (!res.ok) {
+    const txt = await res.text();
+    await Log("backend", "error", "service", `Notifications API error ${res.status}: ${txt}`);
+    throw new Error(`API returned ${res.status}: ${txt}`);
+  }
+
+  const data          = await res.json();
   const notifications = data.notifications;
 
   await Log("backend", "info", "service", `Fetched ${notifications.length} notifications`);
 
-  const N = 10;
+  const N   = parseInt(process.env.TOP_N || "10", 10);
   const top = getTopN(notifications, N);
 
-  await Log("backend", "info", "service", `Top ${N} notifications computed`);
+  await Log("backend", "info", "service", `Top ${N} notifications selected`);
 
-  console.log(`\nTop ${N} Priority Notifications:`);
-  console.log("=".repeat(50));
+  console.log(`\n${"=".repeat(55)}`);
+  console.log(`  Top ${N} Priority Notifications`);
+  console.log(`${"=".repeat(55)}`);
   top.forEach((n, i) => {
-    console.log(`${i + 1}. [${n.Type}] ${n.Message} — ${n.Timestamp}`);
+    const pad = String(i + 1).padStart(2, " ");
+    console.log(`${pad}. [${n.Type.padEnd(9)}] ${n.Message.padEnd(30)} ${n.Timestamp}`);
   });
+  console.log(`${"=".repeat(55)}\n`);
 
   return top;
 }
 
 main().catch(async (err) => {
   await Log("backend", "fatal", "service", `Priority inbox failed: ${err.message}`);
-  console.error(err);
+  console.error("❌ Error:", err.message);
+  process.exit(1);
 });
